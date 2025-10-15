@@ -1,0 +1,229 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import networkx as nx
+
+# =======================
+# Parameters
+# =======================
+N = 2500
+w = 1.0
+timesteps = 500000              # elementary updates (one focal update per step)
+c = 1
+Dr_arrival = 1
+Dg_arrival = 1
+lambda_param = 1
+
+initial_cooperator_fractions = [0.1, 0.3, 0.5, 0.7, 0.9]
+plot_every = 50  # downsample for plotting
+
+# ---- Choose network topology: "WS" (Watts–Strogatz) or "BA" (Barabási–Albert)
+TOPOLOGY = "BA"     # "WS" or "BA"
+
+# Watts–Strogatz params (k_ws must be even)
+k_ws = 4            # mean degree for WS (ring neighbors)
+p_ws = 0.1          # rewiring probability
+
+# Barabási–Albert params
+m_ba = 2            # edges added per new node (average degree ~ 2*m_ba)
+
+rng = np.random.default_rng()
+
+# =======================
+# Core Functions (feedback + Fermi imitation)
+# =======================
+def initialize_population(N, initial_cooperator_fraction):
+    num_cooperators = int(initial_cooperator_fraction * N)
+    strategies = np.array(['C'] * num_cooperators + ['D'] * (N - num_cooperators))
+    rng.shuffle(strategies)
+    return strategies
+
+def get_payoff_matrix(fraction_cooperators, D_r, D_g):
+    base_matrix_1 = np.array([[1, -D_r],
+                              [1 + D_g, 0]], dtype=float)
+    base_matrix_2 = np.array([[0, - Dr_arrival + D_r],
+                              [Dg_arrival - D_g, 0]], dtype=float)
+    additional_matrix = c * (fraction_cooperators**lambda_param) * base_matrix_2
+    return base_matrix_1 + additional_matrix
+
+def calculate_payoff(payoff_matrix, player_strategy, opponent_strategy):
+    si = 0 if player_strategy == 'C' else 1
+    sj = 0 if opponent_strategy == 'C' else 1
+    return payoff_matrix[si, sj]
+
+def fermi_update(delta_payoff, w):
+    return 1.0 / (1.0 + np.exp(-w * delta_payoff))
+
+# =======================
+# Graph utilities
+# =======================
+def build_graph(N, topology="WS", k_ws=4, p_ws=0.1, m_ba=2):
+    """
+    Returns:
+      - neighbors: list of Python lists, neighbors[u] = list of node u's neighbors
+      - degrees: np.array of degrees
+    """
+    if topology == "WS":
+        if k_ws % 2 != 0:
+            raise ValueError("For Watts–Strogatz, k_ws must be even.")
+        G = nx.watts_strogatz_graph(n=N, k=k_ws, p=p_ws, seed=None)
+    elif topology == "BA":
+        if m_ba < 1 or m_ba >= N:
+            raise ValueError("For Barabási–Albert, m_ba must be >=1 and < N.")
+        G = nx.barabasi_albert_graph(n=N, m=m_ba, seed=None)
+    else:
+        raise ValueError("Unknown topology. Use 'WS' or 'BA'.")
+
+    # ensure simple, connected graph (WS is connected for reasonable p; BA is connected by construction)
+    neighbors = [[] for _ in range(N)]
+    for u, v in G.edges():
+        neighbors[u].append(v)
+        neighbors[v].append(u)
+    degrees = np.array([len(neighbors[u]) for u in range(N)], dtype=int)
+    return neighbors, degrees
+
+NEIGHBORS, DEGREES = build_graph(N, topology=TOPOLOGY, k_ws=k_ws, p_ws=p_ws, m_ba=m_ba)
+
+def local_payoff_sum(payoff_matrix, strategies, u):
+    """Sum payoff of node u vs all its neighbors (no self-play)."""
+    s_u = strategies[u]
+    payoff = 0.0
+    for v in NEIGHBORS[u]:
+        payoff += calculate_payoff(payoff_matrix, s_u, strategies[v])
+    return payoff
+
+def simulate_on_graph(N, w, timesteps, initial_cooperator_fraction, D_r, D_g):
+    """
+    Random sequential update on an arbitrary graph:
+      - pick a random focal node x
+      - if x has neighbors, pick random neighbor y
+      - compute π_x, π_y as sum vs their neighbors
+      - x imitates y with Fermi prob based on π_y - π_x
+    Payoff matrix depends on global ρ(t).
+    """
+    strategies = initialize_population(N, initial_cooperator_fraction)
+    cooperators_fraction = []
+
+    for t in range(timesteps):
+        rho = np.mean(strategies == 'C')
+        cooperators_fraction.append(rho)
+
+        payoff_matrix = get_payoff_matrix(rho, D_r, D_g)
+
+        x = rng.integers(0, N)
+        if DEGREES[x] == 0:
+            continue  # isolated node (very unlikely in WS/BA, but safe)
+        y = rng.choice(NEIGHBORS[x])
+
+        pi_x = local_payoff_sum(payoff_matrix, strategies, x)
+        pi_y = local_payoff_sum(payoff_matrix, strategies, y)
+
+        if rng.random() < fermi_update(pi_y - pi_x, w):
+            strategies[x] = strategies[y]
+
+    return cooperators_fraction
+
+def quadrant_color(Dg, Dr):
+    if Dg >= 0 and Dr >= 0:
+        return '#FF0000'   # Prisoner's Dilemma
+    elif Dg <= 0 and Dr <= 0:
+        return '#009900'   # Harmony
+    elif Dg <= 0 and Dr >= 0:
+        return '#0000FF'   # Stag Hunt
+    elif Dg >= 0 and Dr <= 0:
+        return '#FF9933'   # Snowdrift
+    else:
+        return '#A0A0A0'
+
+# =======================
+# Build 20 (D_r, D_g) pairs
+# =======================
+vals = [0.2, 0.35, 0.5, 0.65, 0.8]
+
+PD_pairs = [(dr, dg) for dr, dg in [(vals[0], vals[0]), (vals[1], vals[3]),
+                                    (vals[2], vals[2]), (vals[3], vals[1]), (vals[4], vals[4])]]
+HG_pairs = [(-dr, -dg) for (dr, dg) in [(vals[0], vals[0]), (vals[1], vals[3]),
+                                        (vals[2], vals[2]), (vals[3], vals[1]), (vals[4], vals[4])]]
+SD_pairs = [(-dr, dg) for (dr, dg) in [(vals[0], vals[0]), (vals[1], vals[3]),
+                                       (vals[2], vals[2]), (vals[3], vals[1]), (vals[4], vals[4])]]
+SH_pairs = [(dr, -dg) for (dr, dg) in [(vals[0], vals[0]), (vals[1], vals[3]),
+                                       (vals[2], vals[2]), (vals[3], vals[1]), (vals[4], vals[4])]]
+
+rows = [
+    ("Prisoner's Dilemma (Dg>0, Dr>0)", PD_pairs),
+    ("Harmony Game (Dg<0, Dr<0)", HG_pairs),
+    ("Snowdrift (Dg>0, Dr<0)", SD_pairs),
+    ("Stag Hunt (Dg<0, Dr>0)", SH_pairs),
+]
+
+# =======================
+# Plot 4x5 grid (same visualization)
+# =======================
+toponame = "Watts–Strogatz (k={}, p={})".format(k_ws, p_ws) if TOPOLOGY == "WS" else "Barabási–Albert (m={})".format(m_ba)
+fig, axs = plt.subplots(4, 5, figsize=(24, 18))
+axs = axs.reshape(4, 5)
+
+for row_idx, (row_title, pair_list) in enumerate(rows):
+    print(f"\n=== Starting simulations on {toponame} for {row_title} ===\n")
+    for col_idx, (D_r, D_g) in enumerate(pair_list):
+        ax = axs[row_idx, col_idx]
+        print(f"  → Running pair {col_idx + 1}/5: D_r={D_r:.2f}, D_g={D_g:.2f}")
+
+        for rho_0 in initial_cooperator_fractions:
+            coop_fraction = simulate_on_graph(N, w, timesteps, rho_0, D_r, D_g)
+
+            t_idx = np.arange(0, len(coop_fraction), plot_every)
+            cf = np.array(coop_fraction)[t_idx]
+
+            color_list = []
+            for rho in cf:
+                Dg_t = (1 - rho) * D_g + rho * Dg_arrival
+                Dr_t = (1 - rho) * D_r + rho * Dr_arrival
+                color_list.append(quadrant_color(Dg_t, Dr_t))
+
+            ax.scatter(t_idx, cf, c=color_list, s=14, label=f"ρ₀={rho_0:.2f}")
+
+            # thresholds where Dg_t or Dr_t switch sign
+            if (D_g - Dg_arrival) != 0:
+                y_thr = D_g / (D_g - Dg_arrival)
+                if 0 <= y_thr <= 1:
+                    ax.hlines(y_thr, xmin=0, xmax=len(coop_fraction), colors='#A0A0A0',
+                              linestyles='dashed', linewidth=2)
+            if (D_r - Dr_arrival) != 0:
+                y_thr = D_r / (D_r - Dr_arrival)
+                if 0 <= y_thr <= 1:
+                    ax.hlines(y_thr, xmin=0, xmax=len(coop_fraction), colors='#A0A0A0',
+                              linestyles='dashed', linewidth=2)
+
+        print(f"     ✓ Finished D_r={D_r:.2f}, D_g={D_g:.2f}")
+
+        ax.set_title(f"$D_g$ = {D_g:.2f}, $D_r$ = {D_r:.2f}", fontsize=16)
+        ax.set_xlim(0, timesteps)
+        ax.set_ylim(0, 1)
+        ax.set_xticks([0, timesteps//2, timesteps])
+        ax.set_xticklabels([f"0", f"{timesteps//2}", f"{timesteps}"], fontsize=11)
+        if col_idx == 0:
+            ax.set_yticks([0, 0.5, 1.0])
+            ax.set_yticklabels(['0', '0.5', '1'], fontsize=11)
+        else:
+            ax.set_yticks([0, 1])
+            ax.set_yticklabels(['0', '1'], fontsize=11)
+        ax.grid(False)
+
+    print(f"\n=== Completed all 5 pairs for {row_title} on {toponame} ===\n" + "-"*70)
+
+# Labels and save
+for col in range(5):
+    axs[-1, col].set_xlabel(r'$t$', fontsize=18)
+
+for row_idx, (row_title, _) in enumerate(rows):
+    axs[row_idx, 0].set_ylabel(row_title + "\n\n$\\rho$", fontsize=18)
+
+fig.suptitle(
+    f"{toponame} — Target values: Dg = {Dg_arrival} and Dr = {Dr_arrival}  —  20 (D_r, D_g) pairs (5 per dilemma)",
+    fontsize=22
+)
+plt.tight_layout(rect=[0, 0, 1, 0.95])
+plt.savefig(f"Fraction_Cooperators_4x5_{TOPOLOGY}.pdf", bbox_inches='tight', dpi=300)
+plt.show()
+
+print("\n✅ All graph-based simulations and plotting completed successfully!")
